@@ -590,46 +590,47 @@ HTML_CONTENT = """<!DOCTYPE html>
                         max: maxReviews
                     }).addTo(map);
                 }
-            } else {
-                filteredOutlets.forEach(outlet => {
-                    if (outlet.latitude && outlet.longitude) {
-                        const color = BRAND_COLORS[outlet.brand] || '#6b7280';
-                        const markerIcon = createSvgIcon(color);
-                        const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
-                        
-                        const reviewsVal = getReviewsForPeriod(outlet);
-                        let reviewsText = '';
-                        if (period === 'all') {
-                            reviewsText = `${reviewsVal} Ulasan`;
-                        } else {
-                            const lbl = period === '1m' ? '1 Bulan terakhir' : period === '6m' ? '6 Bulan terakhir' : '12 Bulan terakhir';
-                            reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
-                        }
-
-                        // Construct Popup Content
-                        let popupContent = `
-                            <div class="popup-card">
-                                <div class="popup-title">${outlet.name}</div>
-                                <div class="popup-info">
-                                    <div><strong>Brand:</strong> ${outlet.brand}</div>
-                                    <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span></div>
-                                    <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
-                                        <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
-                                    </a>
-                                </div>
-                            </div>
-                        `;
-
-                        marker.bindPopup(popupContent);
-                        markersGroup.addLayer(marker);
-
-                        // Map marker click event
-                        marker.on('click', () => {
-                            highlightListItem(outlet.id);
-                        });
-                    }
-                });
             }
+
+            // Always render markers
+            filteredOutlets.forEach(outlet => {
+                if (outlet.latitude && outlet.longitude) {
+                    const color = BRAND_COLORS[outlet.brand] || '#6b7280';
+                    const markerIcon = createSvgIcon(color);
+                    const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
+                    
+                    const reviewsVal = getReviewsForPeriod(outlet);
+                    let reviewsText = '';
+                    if (period === 'all') {
+                        reviewsText = `${reviewsVal} Ulasan`;
+                    } else {
+                        const lbl = period === '1m' ? '1 Bulan terakhir' : period === '6m' ? '6 Bulan terakhir' : '12 Bulan terakhir';
+                        reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
+                    }
+
+                    // Construct Popup Content
+                    let popupContent = `
+                        <div class="popup-card">
+                            <div class="popup-title">${outlet.name}</div>
+                            <div class="popup-info">
+                                <div><strong>Brand:</strong> ${outlet.brand}</div>
+                                <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span></div>
+                                <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
+                                    <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
+                                </a>
+                            </div>
+                        </div>
+                    `;
+
+                    marker.bindPopup(popupContent);
+                    markersGroup.addLayer(marker);
+
+                    // Map marker click event
+                    marker.on('click', () => {
+                        highlightListItem(outlet.id);
+                    });
+                }
+            });
 
             // Populate Sidebar List (sorted by reviews descending)
             filteredOutlets.forEach(outlet => {

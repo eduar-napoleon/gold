@@ -350,7 +350,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             gap: 4px;
             background: rgba(251, 191, 36, 0.15);
             color: var(--accent-gold);
-            padding: 2px 6px;
+            padding: 3px 7px;
             border-radius: 4px;
             font-size: 0.75rem;
             font-weight: 600;
@@ -600,6 +600,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                     const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
                     
                     const reviewsVal = getReviewsForPeriod(outlet);
+                    const ratingVal = outlet.rating || 0;
+                    
                     let reviewsText = '';
                     if (period === 'all') {
                         reviewsText = `${reviewsVal} Ulasan`;
@@ -608,13 +610,16 @@ HTML_CONTENT = """<!DOCTYPE html>
                         reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
                     }
 
+                    // Format rating display
+                    const ratingStars = ratingVal > 0 ? `<span style="color: var(--accent-gold); font-weight: 700; margin-right: 6px;"><i class="fa-solid fa-star"></i> ${ratingVal.toFixed(1)}</span>` : '';
+
                     // Construct Popup Content
                     let popupContent = `
                         <div class="popup-card">
                             <div class="popup-title">${outlet.name}</div>
                             <div class="popup-info">
                                 <div><strong>Brand:</strong> ${outlet.brand}</div>
-                                <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span></div>
+                                <div><strong>Populer:</strong> <span class="reviews-badge">${ratingStars}${reviewsText}</span></div>
                                 <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
                                     <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
                                 </a>
@@ -641,6 +646,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                 const brandBadgeClass = outlet.brand.toLowerCase().replace(' ', '');
                 const reviewsVal = getReviewsForPeriod(outlet);
+                const ratingVal = outlet.rating || 0;
                 
                 let reviewsText = '';
                 if (period === 'all') {
@@ -650,6 +656,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                     reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
                 }
 
+                const ratingStars = ratingVal > 0 ? `<span style="color: var(--accent-gold); font-weight: 700; margin-right: 6px;"><i class="fa-solid fa-star"></i> ${ratingVal.toFixed(1)}</span>` : '';
+
                 div.innerHTML = `
                     <div class="item-title">
                         <span>${outlet.name}</span>
@@ -657,7 +665,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     </div>
                     <div class="item-details">
                         <div class="item-detail-row">
-                            <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span>
+                            <span class="reviews-badge">${ratingStars}${reviewsText}</span>
                         </div>
                         ${outlet.google_maps_url ? `<div class="item-detail-row"><i class="fa-solid fa-map-pin"></i> Google Maps Link</div>` : ''}
                     </div>
@@ -723,7 +731,7 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                 cur.execute("""
                     SELECT id, name, type, brand, address, phone, rental_price, size, 
                            rent_terms, google_maps_url, competitors_nearby, photo_url, latitude, longitude, 
-                           reviews_count, reviews_1m, reviews_6m, reviews_12m
+                           reviews_count, reviews_1m, reviews_6m, reviews_12m, rating
                     FROM outlets;
                 """)
                 rows = cur.fetchall()
@@ -747,7 +755,8 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                         'reviews_count': row[14],
                         'reviews_1m': row[15],
                         'reviews_6m': row[16],
-                        'reviews_12m': row[17]
+                        'reviews_12m': row[17],
+                        'rating': row[18]
                     })
                 cur.close()
                 conn.close()

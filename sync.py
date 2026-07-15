@@ -6,6 +6,7 @@ import psycopg2
 import requests
 from bs4 import BeautifulSoup
 import time
+import datetime
 
 DB_URL = "postgresql://neondb_owner:npg_U70SXrAFVTBp@ep-super-pine-aodhk33n-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
@@ -36,6 +37,7 @@ def init_db():
             reviews_1m INT DEFAULT 0,
             reviews_6m INT DEFAULT 0,
             reviews_12m INT DEFAULT 0,
+            rating DOUBLE PRECISION DEFAULT 0.0,
             last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
@@ -43,6 +45,7 @@ def init_db():
     cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_1m INT DEFAULT 0;")
     cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_6m INT DEFAULT 0;")
     cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_12m INT DEFAULT 0;")
+    cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS rating DOUBLE PRECISION DEFAULT 0.0;")
     cur.execute("DELETE FROM outlets WHERE type = 'candidate';")
     conn.commit()
     cur.close()
@@ -51,10 +54,10 @@ def init_db():
 
 def resolve_coords_and_name(url):
     """
-    Follows redirects and parses Google Maps URL for coordinates and place name.
+    Follows redirects and parses Google Maps URL for coordinates, place name, and CID.
     """
     if not url or not (url.startswith('http://') or url.startswith('https://')):
-        return None, None, None
+        return None, None, None, None
 
     try:
         r = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
@@ -80,7 +83,7 @@ def resolve_coords_and_name(url):
         if match:
             lat, lng = float(match.group(1)), float(match.group(2))
         else:
-            # Pattern 2: !3d(-?\d+\.\d+)!4d(-?\d+\.\d+) (Exact place coordinates - prioritize over map camera center!)
+            # Pattern 2: !3d(-?\d+\.\d+)!4d(-?\d+\.\d+) (Exact place coordinates - prioritize over camera center!)
             match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', final_url)
             if match:
                 lat, lng = float(match.group(1)), float(match.group(2))
@@ -101,10 +104,23 @@ def resolve_coords_and_name(url):
             if meta_match:
                 lat, lng = float(meta_match.group(1)), float(meta_match.group(2))
 
-        return lat, lng, place_name
+        # Parse CID from final_url
+        cid = None
+        match_hex = re.search(r'!1s0x[0-9a-fA-F]+:(0x[0-9a-fA-F]+)', final_url)
+        if match_hex:
+            try:
+                cid = int(match_hex.group(1), 16)
+            except Exception:
+                pass
+        if cid is None:
+            match_cid = re.search(r'cid=(\d+)', final_url)
+            if match_cid:
+                cid = int(match_cid.group(1))
+
+        return lat, lng, place_name, cid
     except Exception as e:
         print(f"Error resolving coordinates for {url}: {e}")
-        return None, None, None
+        return None, None, None, None
 
 def geocode_address(address):
     """
@@ -122,45 +138,52 @@ def geocode_address(address):
         print(f"Nominatim geocoding error for {address}: {e}")
     return None, None
 
-def fetch_reviews_count(name, brand, resolved_name=None):
+def fetch_reviews_count(name, brand, resolved_name=None, cid=None):
     """
-    Scrapes the Google Maps Embed API using different query variations.
-    Returns: (reviews_count, latitude, longitude)
+    Scrapes the Google Maps Embed API using direct CID or query variations.
+    Returns: (reviews_count, rating, latitude, longitude)
     """
-    queries = []
+    urls = []
     
-    # 1. Canonical resolved name from redirect (best match)
+    # 1. If CID is present, use it directly (best, 100% accurate)
+    if cid:
+        urls.append((f"https://maps.google.com/maps?cid={cid}&output=embed", f"CID:{cid}"))
+        
+    # Fallback to query variations if no CID or if CID query fails
+    queries = []
     if resolved_name:
         clean_resolved = re.sub(r'\s+@\s*[-+]?\d+\.\d+,\s*[-+]?\d+\.\d+', '', resolved_name)
         queries.append(clean_resolved)
         
-    # Clean the raw name
     clean_name = name
     if name.startswith(f"{brand} - "):
         clean_name = name.replace(f"{brand} - ", "", 1)
     if name.startswith(f"{brand} Indonesia - "):
         clean_name = name.replace(f"{brand} Indonesia - ", "", 1)
         
-    # 2. Brand + Clean Name
     if brand.lower() not in clean_name.lower():
         queries.append(f"{brand} Indonesia - {clean_name}")
         queries.append(f"{brand} {clean_name}")
     else:
         queries.append(clean_name)
         
-    # 3. Add country or city to force single match
     if len(clean_name) < 30:
         queries.append(f"{brand} {clean_name}, Indonesia")
         
-    # Query sequentially until we find a match
     for q in queries:
-        url = f"https://maps.google.com/maps?q={urllib.parse.quote(q)}&output=embed"
+        urls.append((f"https://maps.google.com/maps?q={urllib.parse.quote(q)}&output=embed", q))
+        
+    # Query sequentially until we find a match
+    for url, desc in urls:
         try:
             r = requests.get(url, headers=HEADERS, timeout=8)
-            # Match reviews with thousand separators (like 1.087 or 1,087)
-            match = re.search(r'\"([0-9\.,]+)\s+(?:reviews|ulasan)\"', r.text)
+            # Match rating and reviews count: rating, "reviews count"
+            # e.g., 4.900000095367432,"273 reviews" or 5,"53 reviews"
+            match = re.search(r'([3-5](?:\.\d+)?),\s*\"([0-9\.,]+)\s+(?:reviews|ulasan)\"', r.text)
             if match:
-                raw_val = match.group(1)
+                rating = float(match.group(1))
+                rating = round(rating, 1)
+                raw_val = match.group(2)
                 val = int(raw_val.replace('.', '').replace(',', ''))
                 
                 # Match coordinates from the [[[zoom, longitude, latitude] array in Embed JS
@@ -169,24 +192,43 @@ def fetch_reviews_count(name, brand, resolved_name=None):
                 if coord_match:
                     lng, lat = float(coord_match.group(1)), float(coord_match.group(2))
                     
-                print(f"  Scraped reviews for {name} ({q}): {val} (Coords: {lat}, {lng})")
-                return val, lat, lng
+                print(f"  Scraped reviews for {name} ({desc}): {val} (Rating: {rating}, Coords: {lat}, {lng})")
+                return val, rating, lat, lng
+            else:
+                # Fallback: check only reviews count
+                match_raw = re.search(r'\"([0-9\.,]+)\s+(?:reviews|ulasan)\"', r.text)
+                if match_raw:
+                    raw_val = match_raw.group(1)
+                    val = int(raw_val.replace('.', '').replace(',', ''))
+                    
+                    lat, lng = None, None
+                    coord_match = re.search(r'\[\[\[\d+\.?\d*,\s*(-?\d+\.\d+),\s*(-?\d+\.\d+)\]', r.text)
+                    if coord_match:
+                        lng, lat = float(coord_match.group(1)), float(coord_match.group(2))
+                    
+                    print(f"  Scraped raw reviews for {name} ({desc}): {val} (Coords: {lat}, {lng})")
+                    return val, 0.0, lat, lng
         except Exception as e:
-            print(f"  Error fetching reviews for {q}: {e}")
+            print(f"  Error fetching reviews for {desc}: {e}")
         time.sleep(0.5)
         
-    return 0, None, None
+    return 0, 0.0, None, None
 
 def upsert_outlet(data):
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT reviews_count, reviews_1m, reviews_6m, reviews_12m FROM outlets WHERE google_maps_url = %s;", (data['google_maps_url'],))
+        # Check if record already exists to compute historical delta
+        cur.execute("SELECT reviews_count, reviews_1m, reviews_6m, reviews_12m, rating FROM outlets WHERE google_maps_url = %s;", (data['google_maps_url'],))
         row = cur.fetchone()
         
         new_count = data.get('reviews_count', 0)
+        rating = data.get('rating', 0.0)
+        if rating is None or rating == 0.0:
+            rating = row[4] if row and row[4] else 0.0
+            
         if row:
-            old_count, r1m, r6m, r12m = row
+            old_count, r1m, r6m, r12m, _ = row
             if old_count is None: old_count = 0
             if r1m is None: r1m = 0
             if r6m is None: r6m = 0
@@ -218,8 +260,8 @@ def upsert_outlet(data):
             INSERT INTO outlets (
                 name, type, brand, address, phone, rental_price, size, rent_terms, 
                 google_maps_url, competitors_nearby, photo_url, latitude, longitude, reviews_count, 
-                reviews_1m, reviews_6m, reviews_12m, last_synced
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                reviews_1m, reviews_6m, reviews_12m, rating, last_synced
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (google_maps_url) DO UPDATE SET
                 name = EXCLUDED.name,
                 type = EXCLUDED.type,
@@ -237,12 +279,13 @@ def upsert_outlet(data):
                 reviews_1m = EXCLUDED.reviews_1m,
                 reviews_6m = EXCLUDED.reviews_6m,
                 reviews_12m = EXCLUDED.reviews_12m,
+                rating = EXCLUDED.rating,
                 last_synced = CURRENT_TIMESTAMP;
         """, (
             data['name'], data['type'], data['brand'], data.get('address'), data.get('phone'),
             data.get('rental_price'), data.get('size'), data.get('rent_terms'), data['google_maps_url'],
             data.get('competitors_nearby'), data.get('photo_url'), data.get('latitude'), data.get('longitude'),
-            new_count, r1m, r6m, r12m
+            new_count, r1m, r6m, r12m, rating
         ))
         conn.commit()
     except Exception as e:
@@ -292,19 +335,19 @@ def scrape_raja_emas():
                                 branch_title = txt
                                 break
                                 
-                branch_title = re.sub(r'^\d+', '', branch_title).strip() # strip leading numbers
+                branch_title = re.sub(r'^\d+', '', branch_title).strip()
                 if not branch_title:
                     branch_title = "Raja Emas Outlet"
                 
                 print(f"Resolving Raja Emas: {branch_title} ({href})")
-                lat, lng, resolved_name = resolve_coords_and_name(href)
+                lat, lng, resolved_name, cid = resolve_coords_and_name(href)
                 
                 name = branch_title
                 if not name.lower().startswith("raja emas"):
                     name = f"Raja Emas Indonesia - {name}"
                 
                 if lat and lng:
-                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Raja Emas', resolved_name)
+                    reviews_count, rating, embed_lat, embed_lng = fetch_reviews_count(name, 'Raja Emas', resolved_name, cid)
                     final_lat = embed_lat if embed_lat is not None else lat
                     final_lng = embed_lng if embed_lng is not None else lng
                     
@@ -316,9 +359,10 @@ def scrape_raja_emas():
                         'google_maps_url': href,
                         'latitude': final_lat,
                         'longitude': final_lng,
-                        'reviews_count': reviews_count
+                        'reviews_count': reviews_count,
+                        'rating': rating
                     })
-                    print(f"Saved Raja Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
+                    print(f"Saved Raja Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count}, Rating: {rating})")
     except Exception as e:
         print(f"Error scraping Raja Emas: {e}")
 
@@ -348,14 +392,14 @@ def scrape_i_love_emas():
                     text = "I Love Emas Outlet"
                 
                 print(f"Resolving I Love Emas: {text} ({href})")
-                lat, lng, resolved_name = resolve_coords_and_name(href)
+                lat, lng, resolved_name, cid = resolve_coords_and_name(href)
                 
                 name = resolved_name if resolved_name else text
                 if not name.lower().startswith("i love emas"):
                     name = f"I Love Emas - {name}"
                 
                 if lat and lng:
-                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'I Love Emas', resolved_name)
+                    reviews_count, rating, embed_lat, embed_lng = fetch_reviews_count(name, 'I Love Emas', resolved_name, cid)
                     final_lat = embed_lat if embed_lat is not None else lat
                     final_lng = embed_lng if embed_lng is not None else lng
                     
@@ -367,9 +411,10 @@ def scrape_i_love_emas():
                         'google_maps_url': href,
                         'latitude': final_lat,
                         'longitude': final_lng,
-                        'reviews_count': reviews_count
+                        'reviews_count': reviews_count,
+                        'rating': rating
                     })
-                    print(f"Saved I Love Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
+                    print(f"Saved I Love Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count}, Rating: {rating})")
     except Exception as e:
         print(f"Error scraping I Love Emas: {e}")
 
@@ -400,19 +445,20 @@ def scrape_pandai_emas():
                 
                 lat, lng = None, None
                 resolved_name = None
+                cid = None
                 if 'maps.google.com/?q=' in href or 'maps.google.com/maps?q=' in href:
                     query = urllib.parse.unquote(href.split('q=')[1].split('&')[0])
                     resolved_name = query
                     lat, lng = geocode_address(query + ", Indonesia")
                 else:
-                    lat, lng, resolved_name = resolve_coords_and_name(href)
+                    lat, lng, resolved_name, cid = resolve_coords_and_name(href)
                 
                 name = resolved_name if resolved_name else text
                 if not name.lower().startswith("pandai emas"):
                     name = f"Pandai Emas - {name}"
                 
                 if lat and lng:
-                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Pandai Emas', resolved_name)
+                    reviews_count, rating, embed_lat, embed_lng = fetch_reviews_count(name, 'Pandai Emas', resolved_name, cid)
                     final_lat = embed_lat if embed_lat is not None else lat
                     final_lng = embed_lng if embed_lng is not None else lng
                     
@@ -424,9 +470,10 @@ def scrape_pandai_emas():
                         'google_maps_url': href,
                         'latitude': final_lat,
                         'longitude': final_lng,
-                        'reviews_count': reviews_count
+                        'reviews_count': reviews_count,
+                        'rating': rating
                     })
-                    print(f"Saved Pandai Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
+                    print(f"Saved Pandai Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count}, Rating: {rating})")
     except Exception as e:
         print(f"Error scraping Pandai Emas: {e}")
 
@@ -472,7 +519,7 @@ def scrape_jual_emas():
                 text = "Jual Emas Outlet"
                 
             print(f"Resolving Jual Emas: {text} ({href})")
-            lat, lng, resolved_name = resolve_coords_and_name(href)
+            lat, lng, resolved_name, cid = resolve_coords_and_name(href)
             
             name = resolved_name if resolved_name else text
             name = name.split('|')[0].strip()
@@ -480,7 +527,7 @@ def scrape_jual_emas():
                 name = f"Jual Emas - {name}"
                 
             if lat and lng:
-                reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Jual Emas', resolved_name)
+                reviews_count, rating, embed_lat, embed_lng = fetch_reviews_count(name, 'Jual Emas', resolved_name, cid)
                 final_lat = embed_lat if embed_lat is not None else lat
                 final_lng = embed_lng if embed_lng is not None else lng
                 
@@ -492,18 +539,43 @@ def scrape_jual_emas():
                     'google_maps_url': href,
                     'latitude': final_lat,
                     'longitude': final_lng,
-                    'reviews_count': reviews_count
+                    'reviews_count': reviews_count,
+                    'rating': rating
                 })
-                print(f"Saved Jual Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
+                print(f"Saved Jual Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count}, Rating: {rating})")
     except Exception as e:
         print(f"Error scraping Jual Emas: {e}")
 
 def run_all():
     init_db()
+    
+    # Query database current timestamp to be timezone-safe
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    cur.execute("SELECT CURRENT_TIMESTAMP;")
+    start_time = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    
     scrape_raja_emas()
     scrape_i_love_emas()
     scrape_pandai_emas()
     scrape_jual_emas()
+    
+    # Clean up duplicate and stale competitor records not updated in this run
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM outlets WHERE type = 'competitor' AND last_synced < %s;", (start_time,))
+        conn.commit()
+        print("Stale competitor outlets cleaned up successfully.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error cleaning up stale competitors: {e}")
+    finally:
+        cur.close()
+        conn.close()
+        
     print("All scraping and sync activities completed.")
 
 if __name__ == "__main__":

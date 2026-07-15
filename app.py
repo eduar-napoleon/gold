@@ -10,7 +10,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Peta Analisis Outlet Emas</title>
+    <title>Peta Analisis Kompetitor Outlet Emas</title>
     
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -20,6 +20,9 @@ HTML_CONTENT = """<!DOCTYPE html>
     <!-- Leaflet CSS & JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    
+    <!-- Leaflet Heatmap Plugin -->
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
     
     <!-- FontAwesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -31,7 +34,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             --border-color: rgba(255, 255, 255, 0.08);
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
-            --accent-green: #10b981;
             --accent-gold: #fbbf24;
             --accent-red: #ef4444;
             --accent-pink: #ec4899;
@@ -96,7 +98,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         /* Stats Section */
         .stats-container {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr;
             gap: 12px;
             padding: 16px 24px;
             border-bottom: 1px solid var(--border-color);
@@ -122,7 +124,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             margin-bottom: 4px;
         }
 
-        .stat-val.candidate { color: var(--accent-green); }
         .stat-val.competitor { color: var(--accent-gold); }
 
         .stat-lbl {
@@ -183,7 +184,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             font-weight: 600;
         }
 
-        .badge.candidate { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
         .badge.raja { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.3); }
         .badge.ilove { background: rgba(236, 72, 153, 0.15); color: var(--accent-pink); border: 1px solid rgba(236, 72, 153, 0.3); }
         .badge.pandai { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
@@ -344,18 +344,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             opacity: 0.9;
         }
 
-        /* Overlapping Alert Banner */
-        .overlap-banner {
-            background: rgba(239, 68, 68, 0.15);
-            border: 1px solid var(--accent-red);
-            border-radius: 8px;
-            padding: 8px 12px;
-            margin-top: 8px;
-            font-size: 0.75rem;
-            color: #fca5a5;
-            display: flex;
+        .reviews-badge {
+            display: inline-flex;
             align-items: center;
-            gap: 6px;
+            gap: 4px;
+            background: rgba(251, 191, 36, 0.15);
+            color: var(--accent-gold);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
         }
     </style>
 </head>
@@ -365,32 +363,29 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div id="sidebar">
         <div class="sidebar-header">
             <h1><i class="fa-solid fa-map-location-dot"></i> Emas Map Analyzer</h1>
-            <p>Visualisasi sebaran calon outlet vs kompetitor retail emas.</p>
+            <p>Visualisasi sebaran & popularitas kompetitor retail emas.</p>
         </div>
 
         <!-- Stats -->
         <div class="stats-container">
             <div class="stat-card">
-                <div class="stat-val candidate" id="cnt-candidate">0</div>
-                <div class="stat-lbl">Calon Outlet</div>
-            </div>
-            <div class="stat-card">
                 <div class="stat-val competitor" id="cnt-competitor">0</div>
-                <div class="stat-lbl">Kompetitor</div>
+                <div class="stat-lbl">Total Outlet Kompetitor</div>
             </div>
         </div>
 
         <!-- Filters -->
         <div class="filter-section">
-            <div class="filter-title"><i class="fa-solid fa-filter"></i> Filter Brand / Tipe</div>
+            <div class="filter-title"><i class="fa-solid fa-filter"></i> Filter & Mode</div>
             <div class="filter-group">
-                <div class="filter-item">
+                <!-- Heatmap Toggle -->
+                <div class="filter-item" style="border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 8px;">
                     <div class="filter-checkbox">
-                        <input type="checkbox" id="chk-candidate" checked onchange="updateFilters()">
-                        <span>Calon Outlet</span>
+                        <input type="checkbox" id="chk-heatmap" onchange="updateFilters()">
+                        <span style="font-weight: 600; color: var(--accent-gold);"><i class="fa-solid fa-fire"></i> Mode Heatmap (Ulasan)</span>
                     </div>
-                    <span class="badge candidate" id="cnt-candidate-badge">0</span>
                 </div>
+                
                 <div class="filter-item">
                     <div class="filter-checkbox">
                         <input type="checkbox" id="chk-raja" checked onchange="updateFilters()">
@@ -441,38 +436,26 @@ HTML_CONTENT = """<!DOCTYPE html>
         let map;
         let allOutlets = [];
         let markersGroup;
-        let circlesGroup;
+        let heatLayer = null;
         
         // Custom color marker creation using SVG
-        function createSvgIcon(color, isCandidate = false) {
+        function createSvgIcon(color) {
             let svg = `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
                     <path fill="${color}" stroke="#fff" stroke-width="1.5" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                 </svg>
             `;
-            if (isCandidate) {
-                // Add glowing background ring for candidate pins
-                svg = `
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="38" height="38">
-                        <circle cx="12" cy="12" r="10" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="3 3">
-                            <animate attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="10s" repeatCount="indefinite"/>
-                        </circle>
-                        <path fill="${color}" stroke="#fff" stroke-width="1.5" d="M12 4C9.13 4 7 6.13 7 10c0 4.25 5 10 5 10s5-5.75 5-10c0-3.87-2.13-6-5-6zm0 7.5c-0.98 0-1.75-0.77-1.75-1.75S11.02 8 12 8s1.75 0.77 1.75 1.75S12.98 11.5 12 11.5z"/>
-                    </svg>
-                `;
-            }
             return L.divIcon({
                 html: svg,
                 className: 'custom-svg-icon',
-                iconSize: isCandidate ? [38, 38] : [32, 32],
-                iconAnchor: isCandidate ? [19, 38] : [16, 32],
+                iconSize: [32, 32],
+                iconAnchor: [16, 32],
                 popupAnchor: [0, -32]
             });
         }
 
         // Color mapper
         const BRAND_COLORS = {
-            'Candidate': '#10b981',   // Emerald Green
             'Raja Emas': '#ef4444',   // Red
             'I Love Emas': '#ec4899', // Pink
             'Pandai Emas': '#3b82f6', // Blue
@@ -481,8 +464,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         // Initialize App
         async function init() {
-            // Setup Leaflet map using CartoDB Dark Matter / Positron
-            // Positron light style looks cleaner for Google Map style, Dark Matter for premium dark mode
+            // Setup Leaflet map
             map = L.map('map', {
                 zoomControl: false
             }).setView([-6.2088, 106.8456], 11); // Center in Jakarta
@@ -496,7 +478,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             L.control.zoom({ position: 'topright' }).addTo(map);
 
             markersGroup = L.layerGroup().addTo(map);
-            circlesGroup = L.layerGroup().addTo(map);
 
             await loadOutlets();
         }
@@ -507,7 +488,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 const response = await fetch('/api/outlets');
                 allOutlets = await response.json();
                 
-                // Count and populate UI badges
                 updateCounts();
                 renderFiltersAndList();
             } catch (err) {
@@ -516,13 +496,9 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         function updateCounts() {
-            const candidates = allOutlets.filter(o => o.type === 'candidate');
             const competitors = allOutlets.filter(o => o.type === 'competitor');
-            
-            document.getElementById('cnt-candidate').innerText = candidates.length;
             document.getElementById('cnt-competitor').innerText = competitors.length;
 
-            document.getElementById('cnt-candidate-badge').innerText = candidates.length;
             document.getElementById('cnt-raja-badge').innerText = allOutlets.filter(o => o.brand === 'Raja Emas').length;
             document.getElementById('cnt-ilove-badge').innerText = allOutlets.filter(o => o.brand === 'I Love Emas').length;
             document.getElementById('cnt-pandai-badge').innerText = allOutlets.filter(o => o.brand === 'Pandai Emas').length;
@@ -532,7 +508,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         // Filter flags
         function getActiveBrands() {
             const brands = [];
-            if (document.getElementById('chk-candidate').checked) brands.push('Candidate');
             if (document.getElementById('chk-raja').checked) brands.push('Raja Emas');
             if (document.getElementById('chk-ilove').checked) brands.push('I Love Emas');
             if (document.getElementById('chk-pandai').checked) brands.push('Pandai Emas');
@@ -551,101 +526,103 @@ HTML_CONTENT = """<!DOCTYPE html>
         // Render List and Map Markers
         function renderFiltersAndList() {
             const activeBrands = getActiveBrands();
-            const searchQuery = document.getElementById('search-bar').value.toLowerCase().strip ? 
-                                  document.getElementById('search-bar').value.toLowerCase().trim() : 
-                                  document.getElementById('search-bar').value.toLowerCase();
+            const searchQuery = document.getElementById('search-bar').value.toLowerCase().trim();
+            const showHeatmap = document.getElementById('chk-heatmap').checked;
             
             // Clear existing map layers
             markersGroup.clearLayers();
-            circlesGroup.clearLayers();
+            if (heatLayer) {
+                map.removeLayer(heatLayer);
+                heatLayer = null;
+            }
 
             const listContainer = document.getElementById('outlet-list');
             listContainer.innerHTML = '';
 
-            // Filter data
+            // Filter and sort outlets by review count descending
             const filteredOutlets = allOutlets.filter(o => {
                 const matchesBrand = activeBrands.includes(o.brand);
                 const matchesSearch = o.name.toLowerCase().includes(searchQuery) || 
                                       (o.address && o.address.toLowerCase().includes(searchQuery));
                 return matchesBrand && matchesSearch;
-            });
+            }).sort((a, b) => (b.reviews_count || 0) - (a.reviews_count || 0));
 
-            // Populate Map and List
-            filteredOutlets.forEach(outlet => {
-                if (outlet.latitude && outlet.longitude) {
-                    const color = BRAND_COLORS[outlet.brand] || '#6b7280';
-                    const isCand = outlet.type === 'candidate';
-                    const markerIcon = createSvgIcon(color, isCand);
-
-                    const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
-                    
-                    // Construct Popup Content
-                    let popupContent = `
-                        <div class="popup-card">
-                            <div class="popup-title">${outlet.name}</div>
-                            <div class="popup-info">
-                                <div><strong>Brand:</strong> ${outlet.brand}</div>
-                    `;
-
-                    if (isCand) {
-                        if (outlet.size) popupContent += `<div><strong>Ukuran:</strong> ${outlet.size}</div>`;
-                        if (outlet.phone) popupContent += `<div><strong>No Telp:</strong> ${outlet.phone}</div>`;
-                        if (outlet.rental_price) popupContent += `<div><strong>Harga Sewa:</strong> ${outlet.rental_price}</div>`;
-                        if (outlet.rent_terms) popupContent += `<div><strong>Ketentuan:</strong> ${outlet.rent_terms}</div>`;
-                        if (outlet.competitors_nearby) popupContent += `<div><strong>Kompetitor Dekat:</strong> ${outlet.competitors_nearby}</div>`;
+            // Populate Map
+            if (showHeatmap) {
+                // Collect points with coordinates and review intensity
+                // Format: [lat, lng, intensity]
+                const heatPoints = [];
+                let maxReviews = 1;
+                
+                filteredOutlets.forEach(o => {
+                    if (o.latitude && o.longitude) {
+                        const reviews = o.reviews_count || 0;
+                        if (reviews > maxReviews) maxReviews = reviews;
+                        heatPoints.push([o.latitude, o.longitude, reviews]);
                     }
-
-                    popupContent += `
-                                <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
-                                    <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
-                                </a>
+                });
+                
+                if (heatPoints.length > 0) {
+                    heatLayer = L.heatLayer(heatPoints, {
+                        radius: 35,
+                        blur: 20,
+                        maxZoom: 15,
+                        max: maxReviews
+                    }).addTo(map);
+                }
+            } else {
+                filteredOutlets.forEach(outlet => {
+                    if (outlet.latitude && outlet.longitude) {
+                        const color = BRAND_COLORS[outlet.brand] || '#6b7280';
+                        const markerIcon = createSvgIcon(color);
+                        const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
+                        
+                        // Construct Popup Content
+                        let popupContent = `
+                            <div class="popup-card">
+                                <div class="popup-title">${outlet.name}</div>
+                                <div class="popup-info">
+                                    <div><strong>Brand:</strong> ${outlet.brand}</div>
+                                    <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${outlet.reviews_count || 0} Ulasan</span></div>
+                                    <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
+                                        <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
+                                    </a>
+                                </div>
                             </div>
-                        </div>
-                    `;
+                        `;
 
-                    marker.bindPopup(popupContent);
-                    markersGroup.addLayer(marker);
+                        marker.bindPopup(popupContent);
+                        markersGroup.addLayer(marker);
 
-                    // Add 2km radius circle around candidate locations for overlap analysis
-                    if (isCand) {
-                        const circle = L.circle([outlet.latitude, outlet.longitude], {
-                            color: color,
-                            fillColor: color,
-                            fillOpacity: 0.08,
-                            radius: 2000, // 2km radius
-                            weight: 1,
-                            dashArray: '4, 4'
+                        // Map marker click event
+                        marker.on('click', () => {
+                            highlightListItem(outlet.id);
                         });
-                        circlesGroup.addLayer(circle);
                     }
+                });
+            }
 
-                    // Map marker click event
-                    marker.on('click', () => {
-                        highlightListItem(outlet.id);
-                    });
-                }
+            // Populate Sidebar List (sorted by reviews descending)
+            filteredOutlets.forEach(outlet => {
+                const div = document.createElement('div');
+                div.className = 'list-item';
+                div.id = `item-${outlet.id}`;
+                div.onclick = () => focusOnOutlet(outlet);
 
-                // Add to Sidebar list if it's a Candidate (makes scanning new locations easier)
-                if (outlet.type === 'candidate') {
-                    const div = document.createElement('div');
-                    div.className = 'list-item';
-                    div.id = `item-${outlet.id}`;
-                    div.onclick = () => focusOnOutlet(outlet);
-
-                    div.innerHTML = `
-                        <div class="item-title">
-                            <span>${outlet.name}</span>
-                            <span class="badge candidate">Calon</span>
+                const brandBadgeClass = outlet.brand.toLowerCase().replace(' ', '');
+                div.innerHTML = `
+                    <div class="item-title">
+                        <span>${outlet.name}</span>
+                        <span class="badge ${brandBadgeClass}">${outlet.brand}</span>
+                    </div>
+                    <div class="item-details">
+                        <div class="item-detail-row">
+                            <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${outlet.reviews_count || 0} Ulasan</span>
                         </div>
-                        <div class="item-details">
-                            ${outlet.rental_price ? `<div class="item-detail-row"><i class="fa-solid fa-money-bill-wave" style="color: var(--accent-green)"></i> ${outlet.rental_price}</div>` : ''}
-                            ${outlet.size ? `<div class="item-detail-row"><i class="fa-solid fa-maximize"></i> Ukuran: ${outlet.size}</div>` : ''}
-                            ${outlet.phone ? `<div class="item-detail-row"><i class="fa-solid fa-phone"></i> ${outlet.phone}</div>` : ''}
-                            ${outlet.competitors_nearby ? `<div class="overlap-banner"><i class="fa-solid fa-triangle-exclamation"></i> Dekat: ${outlet.competitors_nearby}</div>` : ''}
-                        </div>
-                    `;
-                    listContainer.appendChild(div);
-                }
+                        ${outlet.google_maps_url ? `<div class="item-detail-row"><i class="fa-solid fa-map-pin"></i> Google Maps Link</div>` : ''}
+                    </div>
+                `;
+                listContainer.appendChild(div);
             });
 
             // If empty
@@ -660,21 +637,22 @@ HTML_CONTENT = """<!DOCTYPE html>
                 duration: 1.5
             });
 
-            // Find and open popup
-            markersGroup.eachLayer(marker => {
-                const latlng = marker.getLatLng();
-                if (latlng.lat === outlet.latitude && latlng.lng === outlet.longitude) {
-                    marker.openPopup();
-                }
-            });
+            // Find and open popup if not in heatmap mode
+            const showHeatmap = document.getElementById('chk-heatmap').checked;
+            if (!showHeatmap) {
+                markersGroup.eachLayer(marker => {
+                    const latlng = marker.getLatLng();
+                    if (latlng.lat === outlet.latitude && latlng.lng === outlet.longitude) {
+                        marker.openPopup();
+                    }
+                });
+            }
 
             highlightListItem(outlet.id);
         }
 
         function highlightListItem(id) {
-            // Remove active classes
             document.querySelectorAll('.list-item').forEach(el => el.classList.remove('active'));
-            // Add active class
             const activeItem = document.getElementById(`item-${id}`);
             if (activeItem) {
                 activeItem.classList.add('active');
@@ -704,7 +682,7 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                 cur = conn.cursor()
                 cur.execute("""
                     SELECT id, name, type, brand, address, phone, rental_price, size, 
-                           rent_terms, google_maps_url, competitors_nearby, photo_url, latitude, longitude
+                           rent_terms, google_maps_url, competitors_nearby, photo_url, latitude, longitude, reviews_count
                     FROM outlets;
                 """)
                 rows = cur.fetchall()
@@ -724,7 +702,8 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                         'competitors_nearby': row[10],
                         'photo_url': row[11],
                         'latitude': row[12],
-                        'longitude': row[13]
+                        'longitude': row[13],
+                        'reviews_count': row[14]
                     })
                 cur.close()
                 conn.close()

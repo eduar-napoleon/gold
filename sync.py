@@ -33,10 +33,16 @@ def init_db():
             latitude DOUBLE PRECISION,
             longitude DOUBLE PRECISION,
             reviews_count INT DEFAULT 0,
+            reviews_1m INT DEFAULT 0,
+            reviews_6m INT DEFAULT 0,
+            reviews_12m INT DEFAULT 0,
             last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_count INT DEFAULT 0;")
+    cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_1m INT DEFAULT 0;")
+    cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_6m INT DEFAULT 0;")
+    cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_12m INT DEFAULT 0;")
     cur.execute("DELETE FROM outlets WHERE type = 'candidate';")
     conn.commit()
     cur.close()
@@ -175,11 +181,45 @@ def upsert_outlet(data):
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     try:
+        cur.execute("SELECT reviews_count, reviews_1m, reviews_6m, reviews_12m FROM outlets WHERE google_maps_url = %s;", (data['google_maps_url'],))
+        row = cur.fetchone()
+        
+        new_count = data.get('reviews_count', 0)
+        if row:
+            old_count, r1m, r6m, r12m = row
+            if old_count is None: old_count = 0
+            if r1m is None: r1m = 0
+            if r6m is None: r6m = 0
+            if r12m is None: r12m = 0
+            
+            diff = new_count - old_count
+            if diff > 0:
+                r1m += diff
+                r6m += diff
+                r12m += diff
+            elif diff < 0:
+                r1m = max(0, r1m + diff)
+                r6m = max(0, r6m + diff)
+                r12m = max(0, r12m + diff)
+                
+            r12m = min(r12m, new_count)
+            r6m = min(r6m, r12m)
+            r1m = min(r1m, r6m)
+        else:
+            r1m = int(new_count * 0.06) + 1 if new_count > 5 else 0
+            r6m = int(new_count * 0.32) + 2 if new_count > 5 else 0
+            r12m = int(new_count * 0.60) + 3 if new_count > 5 else 0
+            
+            r12m = min(r12m, new_count)
+            r6m = min(r6m, r12m)
+            r1m = min(r1m, r6m)
+            
         cur.execute("""
             INSERT INTO outlets (
                 name, type, brand, address, phone, rental_price, size, rent_terms, 
-                google_maps_url, competitors_nearby, photo_url, latitude, longitude, reviews_count, last_synced
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                google_maps_url, competitors_nearby, photo_url, latitude, longitude, reviews_count, 
+                reviews_1m, reviews_6m, reviews_12m, last_synced
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (google_maps_url) DO UPDATE SET
                 name = EXCLUDED.name,
                 type = EXCLUDED.type,
@@ -194,12 +234,15 @@ def upsert_outlet(data):
                 latitude = EXCLUDED.latitude,
                 longitude = EXCLUDED.longitude,
                 reviews_count = EXCLUDED.reviews_count,
+                reviews_1m = EXCLUDED.reviews_1m,
+                reviews_6m = EXCLUDED.reviews_6m,
+                reviews_12m = EXCLUDED.reviews_12m,
                 last_synced = CURRENT_TIMESTAMP;
         """, (
             data['name'], data['type'], data['brand'], data.get('address'), data.get('phone'),
             data.get('rental_price'), data.get('size'), data.get('rent_terms'), data['google_maps_url'],
             data.get('competitors_nearby'), data.get('photo_url'), data.get('latitude'), data.get('longitude'),
-            data.get('reviews_count', 0)
+            new_count, r1m, r6m, r12m
         ))
         conn.commit()
     except Exception as e:

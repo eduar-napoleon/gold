@@ -379,11 +379,24 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="filter-title"><i class="fa-solid fa-filter"></i> Filter & Mode</div>
             <div class="filter-group">
                 <!-- Heatmap Toggle -->
-                <div class="filter-item" style="border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 8px;">
+                <div class="filter-item" style="border-bottom: 1px solid var(--border-color); padding-bottom: 10px;">
                     <div class="filter-checkbox">
                         <input type="checkbox" id="chk-heatmap" onchange="updateFilters()">
                         <span style="font-weight: 600; color: var(--accent-gold);"><i class="fa-solid fa-fire"></i> Mode Heatmap (Ulasan)</span>
                     </div>
+                </div>
+
+                <!-- Review Period Selector -->
+                <div class="filter-item" style="border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 8px; display: block; cursor: default;">
+                    <div style="font-size: 0.85rem; font-weight: 500; margin-bottom: 6px; color: var(--text-muted);">
+                        Filter Waktu Ulasan:
+                    </div>
+                    <select id="sel-period" onchange="updateFilters()" style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; color: #fff; outline: none; font-size: 0.85rem; cursor: pointer;">
+                        <option value="all">Semua Waktu (All Time)</option>
+                        <option value="1m">1 Bulan Terakhir</option>
+                        <option value="6m">6 Bulan Terakhir</option>
+                        <option value="12m">12 Bulan Terakhir</option>
+                    </select>
                 </div>
                 
                 <div class="filter-item">
@@ -528,6 +541,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             const activeBrands = getActiveBrands();
             const searchQuery = document.getElementById('search-bar').value.toLowerCase().trim();
             const showHeatmap = document.getElementById('chk-heatmap').checked;
+            const period = document.getElementById('sel-period').value;
             
             // Clear existing map layers
             markersGroup.clearLayers();
@@ -539,24 +553,30 @@ HTML_CONTENT = """<!DOCTYPE html>
             const listContainer = document.getElementById('outlet-list');
             listContainer.innerHTML = '';
 
-            // Filter and sort outlets by review count descending
+            // Helper to get period-specific review counts
+            const getReviewsForPeriod = (o) => {
+                if (period === '1m') return o.reviews_1m || 0;
+                if (period === '6m') return o.reviews_6m || 0;
+                if (period === '12m') return o.reviews_12m || 0;
+                return o.reviews_count || 0;
+            };
+
+            // Filter and sort outlets by review count descending (dynamic based on selected period)
             const filteredOutlets = allOutlets.filter(o => {
                 const matchesBrand = activeBrands.includes(o.brand);
                 const matchesSearch = o.name.toLowerCase().includes(searchQuery) || 
                                       (o.address && o.address.toLowerCase().includes(searchQuery));
                 return matchesBrand && matchesSearch;
-            }).sort((a, b) => (b.reviews_count || 0) - (a.reviews_count || 0));
+            }).sort((a, b) => getReviewsForPeriod(b) - getReviewsForPeriod(a));
 
             // Populate Map
             if (showHeatmap) {
-                // Collect points with coordinates and review intensity
-                // Format: [lat, lng, intensity]
                 const heatPoints = [];
                 let maxReviews = 1;
                 
                 filteredOutlets.forEach(o => {
                     if (o.latitude && o.longitude) {
-                        const reviews = o.reviews_count || 0;
+                        const reviews = getReviewsForPeriod(o);
                         if (reviews > maxReviews) maxReviews = reviews;
                         heatPoints.push([o.latitude, o.longitude, reviews]);
                     }
@@ -577,13 +597,22 @@ HTML_CONTENT = """<!DOCTYPE html>
                         const markerIcon = createSvgIcon(color);
                         const marker = L.marker([outlet.latitude, outlet.longitude], { icon: markerIcon });
                         
+                        const reviewsVal = getReviewsForPeriod(outlet);
+                        let reviewsText = '';
+                        if (period === 'all') {
+                            reviewsText = `${reviewsVal} Ulasan`;
+                        } else {
+                            const lbl = period === '1m' ? '1 Bulan terakhir' : period === '6m' ? '6 Bulan terakhir' : '12 Bulan terakhir';
+                            reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
+                        }
+
                         // Construct Popup Content
                         let popupContent = `
                             <div class="popup-card">
                                 <div class="popup-title">${outlet.name}</div>
                                 <div class="popup-info">
                                     <div><strong>Brand:</strong> ${outlet.brand}</div>
-                                    <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${outlet.reviews_count || 0} Ulasan</span></div>
+                                    <div><strong>Populer:</strong> <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span></div>
                                     <a href="${outlet.google_maps_url}" target="_blank" class="popup-btn">
                                         <i class="fa-solid fa-location-arrow"></i> Buka Google Maps
                                     </a>
@@ -610,6 +639,16 @@ HTML_CONTENT = """<!DOCTYPE html>
                 div.onclick = () => focusOnOutlet(outlet);
 
                 const brandBadgeClass = outlet.brand.toLowerCase().replace(' ', '');
+                const reviewsVal = getReviewsForPeriod(outlet);
+                
+                let reviewsText = '';
+                if (period === 'all') {
+                    reviewsText = `${reviewsVal} Ulasan`;
+                } else {
+                    const lbl = period === '1m' ? '1 Bln' : period === '6m' ? '6 Bln' : '12 Bln';
+                    reviewsText = `${reviewsVal} Ulasan Baru (${lbl})`;
+                }
+
                 div.innerHTML = `
                     <div class="item-title">
                         <span>${outlet.name}</span>
@@ -617,7 +656,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     </div>
                     <div class="item-details">
                         <div class="item-detail-row">
-                            <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${outlet.reviews_count || 0} Ulasan</span>
+                            <span class="reviews-badge"><i class="fa-solid fa-comments"></i> ${reviewsText}</span>
                         </div>
                         ${outlet.google_maps_url ? `<div class="item-detail-row"><i class="fa-solid fa-map-pin"></i> Google Maps Link</div>` : ''}
                     </div>
@@ -682,7 +721,8 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                 cur = conn.cursor()
                 cur.execute("""
                     SELECT id, name, type, brand, address, phone, rental_price, size, 
-                           rent_terms, google_maps_url, competitors_nearby, photo_url, latitude, longitude, reviews_count
+                           rent_terms, google_maps_url, competitors_nearby, photo_url, latitude, longitude, 
+                           reviews_count, reviews_1m, reviews_6m, reviews_12m
                     FROM outlets;
                 """)
                 rows = cur.fetchall()
@@ -703,7 +743,10 @@ class MapRequestHandler(BaseHTTPRequestHandler):
                         'photo_url': row[11],
                         'latitude': row[12],
                         'longitude': row[13],
-                        'reviews_count': row[14]
+                        'reviews_count': row[14],
+                        'reviews_1m': row[15],
+                        'reviews_6m': row[16],
+                        'reviews_12m': row[17]
                     })
                 cur.close()
                 conn.close()

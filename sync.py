@@ -37,7 +37,6 @@ def init_db():
         );
     """)
     cur.execute("ALTER TABLE outlets ADD COLUMN IF NOT EXISTS reviews_count INT DEFAULT 0;")
-    # Delete candidates completely as requested
     cur.execute("DELETE FROM outlets WHERE type = 'candidate';")
     conn.commit()
     cur.close()
@@ -75,13 +74,13 @@ def resolve_coords_and_name(url):
         if match:
             lat, lng = float(match.group(1)), float(match.group(2))
         else:
-            # Pattern 2: @lat,lng
-            match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', final_url)
+            # Pattern 2: !3d(-?\d+\.\d+)!4d(-?\d+\.\d+) (Exact place coordinates - prioritize over map camera center!)
+            match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', final_url)
             if match:
                 lat, lng = float(match.group(1)), float(match.group(2))
             else:
-                # Pattern 3: !3d(-?\d+\.\d+)!4d(-?\d+\.\d+)
-                match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', final_url)
+                # Pattern 3: @lat,lng (Fallback map camera center)
+                match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', final_url)
                 if match:
                     lat, lng = float(match.group(1)), float(match.group(2))
                 else:
@@ -119,7 +118,8 @@ def geocode_address(address):
 
 def fetch_reviews_count(name, brand, resolved_name=None):
     """
-    Scrapes the Google Maps Embed API using different query variations to extract the review count.
+    Scrapes the Google Maps Embed API using different query variations.
+    Returns: (reviews_count, latitude, longitude)
     """
     queries = []
     
@@ -132,9 +132,12 @@ def fetch_reviews_count(name, brand, resolved_name=None):
     clean_name = name
     if name.startswith(f"{brand} - "):
         clean_name = name.replace(f"{brand} - ", "", 1)
+    if name.startswith(f"{brand} Indonesia - "):
+        clean_name = name.replace(f"{brand} Indonesia - ", "", 1)
         
-    # 2. Brand + Clean Name (e.g. Raja Emas Indonesia Mega Bekasi Hypermall)
+    # 2. Brand + Clean Name
     if brand.lower() not in clean_name.lower():
+        queries.append(f"{brand} Indonesia - {clean_name}")
         queries.append(f"{brand} {clean_name}")
     else:
         queries.append(clean_name)
@@ -148,16 +151,25 @@ def fetch_reviews_count(name, brand, resolved_name=None):
         url = f"https://maps.google.com/maps?q={urllib.parse.quote(q)}&output=embed"
         try:
             r = requests.get(url, headers=HEADERS, timeout=8)
-            match = re.search(r'\"(\d+)\s+(?:reviews|ulasan)\"', r.text)
+            # Match reviews with thousand separators (like 1.087 or 1,087)
+            match = re.search(r'\"([0-9\.,]+)\s+(?:reviews|ulasan)\"', r.text)
             if match:
-                val = int(match.group(1))
-                print(f"  Scraped reviews for {name}: {val}")
-                return val
+                raw_val = match.group(1)
+                val = int(raw_val.replace('.', '').replace(',', ''))
+                
+                # Match coordinates from the [[[zoom, longitude, latitude] array in Embed JS
+                lat, lng = None, None
+                coord_match = re.search(r'\[\[\[\d+\.?\d*,\s*(-?\d+\.\d+),\s*(-?\d+\.\d+)\]', r.text)
+                if coord_match:
+                    lng, lat = float(coord_match.group(1)), float(coord_match.group(2))
+                    
+                print(f"  Scraped reviews for {name} ({q}): {val} (Coords: {lat}, {lng})")
+                return val, lat, lng
         except Exception as e:
             print(f"  Error fetching reviews for {q}: {e}")
         time.sleep(0.5)
         
-    return 0
+    return 0, None, None
 
 def upsert_outlet(data):
     conn = psycopg2.connect(DB_URL)
@@ -179,8 +191,8 @@ def upsert_outlet(data):
                 rent_terms = COALESCE(EXCLUDED.rent_terms, outlets.rent_terms),
                 competitors_nearby = COALESCE(EXCLUDED.competitors_nearby, outlets.competitors_nearby),
                 photo_url = COALESCE(EXCLUDED.photo_url, outlets.photo_url),
-                latitude = COALESCE(EXCLUDED.latitude, outlets.latitude),
-                longitude = COALESCE(EXCLUDED.longitude, outlets.longitude),
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude,
                 reviews_count = EXCLUDED.reviews_count,
                 last_synced = CURRENT_TIMESTAMP;
         """, (
@@ -204,39 +216,66 @@ def scrape_raja_emas():
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         
+        processed_urls = set()
         links = soup.find_all('a', href=True)
         for a in links:
             href = a['href']
             if 'maps.app.goo.gl' in href or 'google.com/maps' in href or 'share.google' in href:
-                text = a.text.strip()
-                if not text:
-                    parent = a.find_parent()
-                    text = parent.text.strip() if parent else "Raja Emas Branch"
+                if href in processed_urls:
+                    continue
+                processed_urls.add(href)
                 
-                text = re.sub(r'\s+', ' ', text).strip()
-                if not text or len(text) < 3 or 'lokasi' in text.lower():
-                    text = "Raja Emas Outlet"
+                # Find specific branch heading by traversing up to column element
+                branch_title = ''
+                parent_col = None
+                curr = a
+                while curr:
+                    curr = curr.parent
+                    if curr and curr.name == 'div' and curr.get('class') and any('bde-column' in c for c in curr.get('class')):
+                        parent_col = curr
+                        break
                 
-                print(f"Resolving Raja Emas: {text} ({href})")
+                if parent_col:
+                    headers = parent_col.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'span'])
+                    for h in headers:
+                        txt = h.text.strip()
+                        if txt and re.search(r'^\d+[A-Za-z]', txt):
+                            branch_title = txt
+                            break
+                    if not branch_title:
+                        for h in headers:
+                            txt = h.text.strip()
+                            if txt and len(txt) < 40 and not any(kw in txt.lower() for kw in ['lokasi', 'buka', 'whatsapp', 'catatan']):
+                                branch_title = txt
+                                break
+                                
+                branch_title = re.sub(r'^\d+', '', branch_title).strip() # strip leading numbers
+                if not branch_title:
+                    branch_title = "Raja Emas Outlet"
+                
+                print(f"Resolving Raja Emas: {branch_title} ({href})")
                 lat, lng, resolved_name = resolve_coords_and_name(href)
                 
-                name = resolved_name if resolved_name else text
+                name = branch_title
                 if not name.lower().startswith("raja emas"):
-                    name = f"Raja Emas - {name}"
+                    name = f"Raja Emas Indonesia - {name}"
                 
                 if lat and lng:
-                    reviews_count = fetch_reviews_count(name, 'Raja Emas', resolved_name)
+                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Raja Emas', resolved_name)
+                    final_lat = embed_lat if embed_lat is not None else lat
+                    final_lng = embed_lng if embed_lng is not None else lng
+                    
                     upsert_outlet({
                         'name': name,
                         'type': 'competitor',
                         'brand': 'Raja Emas',
                         'address': name,
                         'google_maps_url': href,
-                        'latitude': lat,
-                        'longitude': lng,
+                        'latitude': final_lat,
+                        'longitude': final_lng,
                         'reviews_count': reviews_count
                     })
-                    print(f"Saved Raja Emas: {name} -> {lat}, {lng} (Reviews: {reviews_count})")
+                    print(f"Saved Raja Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
     except Exception as e:
         print(f"Error scraping Raja Emas: {e}")
 
@@ -247,10 +286,15 @@ def scrape_i_love_emas():
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         
+        processed_urls = set()
         links = soup.find_all('a', href=True)
         for a in links:
             href = a['href']
             if 'maps.app.goo.gl' in href or 'google.com/maps' in href or 'share.google' in href:
+                if href in processed_urls:
+                    continue
+                processed_urls.add(href)
+                
                 text = a.text.strip()
                 if not text:
                     parent = a.find_parent()
@@ -268,18 +312,21 @@ def scrape_i_love_emas():
                     name = f"I Love Emas - {name}"
                 
                 if lat and lng:
-                    reviews_count = fetch_reviews_count(name, 'I Love Emas', resolved_name)
+                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'I Love Emas', resolved_name)
+                    final_lat = embed_lat if embed_lat is not None else lat
+                    final_lng = embed_lng if embed_lng is not None else lng
+                    
                     upsert_outlet({
                         'name': name,
                         'type': 'competitor',
                         'brand': 'I Love Emas',
                         'address': name,
                         'google_maps_url': href,
-                        'latitude': lat,
-                        'longitude': lng,
+                        'latitude': final_lat,
+                        'longitude': final_lng,
                         'reviews_count': reviews_count
                     })
-                    print(f"Saved I Love Emas: {name} -> {lat}, {lng} (Reviews: {reviews_count})")
+                    print(f"Saved I Love Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
     except Exception as e:
         print(f"Error scraping I Love Emas: {e}")
 
@@ -290,10 +337,15 @@ def scrape_pandai_emas():
         r = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(r.text, 'html.parser')
         
+        processed_urls = set()
         links = soup.find_all('a', href=True)
         for a in links:
             href = a['href']
             if 'maps.google.com' in href or 'maps.app.goo.gl' in href or 'google.com/maps' in href:
+                if href in processed_urls:
+                    continue
+                processed_urls.add(href)
+                
                 text = a.text.strip()
                 if not text:
                     parent = a.find_parent()
@@ -317,18 +369,21 @@ def scrape_pandai_emas():
                     name = f"Pandai Emas - {name}"
                 
                 if lat and lng:
-                    reviews_count = fetch_reviews_count(name, 'Pandai Emas', resolved_name)
+                    reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Pandai Emas', resolved_name)
+                    final_lat = embed_lat if embed_lat is not None else lat
+                    final_lng = embed_lng if embed_lng is not None else lng
+                    
                     upsert_outlet({
                         'name': name,
                         'type': 'competitor',
                         'brand': 'Pandai Emas',
                         'address': name,
                         'google_maps_url': href,
-                        'latitude': lat,
-                        'longitude': lng,
+                        'latitude': final_lat,
+                        'longitude': final_lng,
                         'reviews_count': reviews_count
                     })
-                    print(f"Saved Pandai Emas: {name} -> {lat}, {lng} (Reviews: {reviews_count})")
+                    print(f"Saved Pandai Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
     except Exception as e:
         print(f"Error scraping Pandai Emas: {e}")
 
@@ -345,6 +400,7 @@ def scrape_jual_emas():
             if '/cabang/' in href:
                 branch_pages.add(urllib.parse.urljoin(url, href))
         
+        processed_urls = set()
         maps_links = set()
         for a in soup.find_all('a', href=True):
             href = a['href']
@@ -364,6 +420,10 @@ def scrape_jual_emas():
                 print(f"Error scraping branch page {b_url}: {e}")
                 
         for href, text in maps_links:
+            if href in processed_urls:
+                continue
+            processed_urls.add(href)
+            
             text = re.sub(r'\s+', ' ', text).strip()
             if not text or len(text) < 3 or 'lokasi' in text.lower() or 'cek' in text.lower():
                 text = "Jual Emas Outlet"
@@ -377,24 +437,26 @@ def scrape_jual_emas():
                 name = f"Jual Emas - {name}"
                 
             if lat and lng:
-                reviews_count = fetch_reviews_count(name, 'Jual Emas', resolved_name)
+                reviews_count, embed_lat, embed_lng = fetch_reviews_count(name, 'Jual Emas', resolved_name)
+                final_lat = embed_lat if embed_lat is not None else lat
+                final_lng = embed_lng if embed_lng is not None else lng
+                
                 upsert_outlet({
                     'name': name,
                     'type': 'competitor',
                     'brand': 'Jual Emas',
                     'address': name,
                     'google_maps_url': href,
-                    'latitude': lat,
-                    'longitude': lng,
+                    'latitude': final_lat,
+                    'longitude': final_lng,
                     'reviews_count': reviews_count
                 })
-                print(f"Saved Jual Emas: {name} -> {lat}, {lng} (Reviews: {reviews_count})")
+                print(f"Saved Jual Emas: {name} -> {final_lat}, {final_lng} (Reviews: {reviews_count})")
     except Exception as e:
         print(f"Error scraping Jual Emas: {e}")
 
 def run_all():
     init_db()
-    # Scrape competitor websites only
     scrape_raja_emas()
     scrape_i_love_emas()
     scrape_pandai_emas()
